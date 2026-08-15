@@ -59,21 +59,72 @@ def load_image(path):
     return cv2.imread(path)
 
 
-def process_one(path, tier_name, mask_gen, csv_rows):
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+
+def save_diagnostic(path, tier_name, img, tubes, roi_mask=None, a_val=None,
+                    fail_reason=None, outdir="."):
+    """Always saves a panel -- success or failure -- so you can see what
+    happened on THIS image without waiting for the whole batch."""
+    diagdir = os.path.join(outdir, "_debug")
+    os.makedirs(diagdir, exist_ok=True)
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    fig, ax = plt.subplots(1, 2, figsize=(7, 3.6), dpi=110)
+    ax[0].imshow(img_rgb); ax[0].set_title("input"); ax[0].axis("off")
+
+    if fail_reason:
+        ax[1].imshow(img_rgb)
+        ax[1].set_title("NO TUBE FOUND", color="red")
+        ax[1].text(0.02, 0.98, fail_reason, transform=ax[1].transAxes,
+                   va="top", ha="left", color="white", fontsize=9,
+                   bbox=dict(fc="red", alpha=0.75, boxstyle="round"))
+        ax[1].axis("off")
+        status = "FAIL"
+    else:
+        vis = img.copy()
+        tint = np.zeros_like(vis); tint[tubes[0]["mask"]] = (0, 200, 0)
+        vis = cv2.addWeighted(vis, 1.0, tint, 0.3, 0)
+        if roi_mask is not None:
+            tint2 = np.zeros_like(vis); tint2[roi_mask] = (0, 0, 255)
+            vis = cv2.addWeighted(vis, 1.0, tint2, 0.55, 0)
+        ax[1].imshow(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))
+        ax[1].set_title(f"detected  a*={a_val:.2f}" if a_val is not None else "detected")
+        ax[1].axis("off")
+        status = "OK"
+
+    fig.suptitle(f"[{tier_name}] {os.path.basename(path)}  -- {status}",
+                 fontsize=10, color=("red" if status == "FAIL" else "black"))
+    plt.tight_layout()
+    outpath = os.path.join(diagdir, f"{os.path.splitext(os.path.basename(path))[0]}_debug.png")
+    fig.savefig(outpath, bbox_inches="tight")
+    plt.close(fig)
+    return outpath
+
+
+def process_one(path, tier_name, mask_gen, csv_rows, outdir="."):
     img = load_image(path)
     if img is None:
-        print(f"  [skip] cannot read {path}")
+        print(f"  [FAIL] {os.path.basename(path):25} cannot read file")
         return
 
-    tubes = detector_sam.detect_tubes(img, mask_gen, single_tube=True)
+    tubes = detector_sam.detect_tubes(img, mask_gen, single_tube=True, debug=True)
     if not tubes:
-        print(f"  [skip] no tube detected: {os.path.basename(path)}")
+        reason = "No mask passed the shape filter\n(area / aspect ratio / solidity / max-area-fraction).\nSee console debug output above for per-mask reasons."
+        dpath = save_diagnostic(path, tier_name, img, tubes, fail_reason=reason, outdir=outdir)
+        print(f"  [FAIL] {os.path.basename(path):25} no tube detected -> {dpath}")
         return
     t = tubes[0]
 
     pr = pellet_extractor.extract_pellet(img, t["mask"], t["bbox"], readout="fluid")
     m = pellet_extractor.measure_pellet(img, pr["roi_mask"], space="all")
     lab = m.get("LAB", {}); hsv = m.get("HSV", {}); rgb = m.get("RGB", {})
+    a_val = lab.get("a", 0.0)
+
+    dpath = save_diagnostic(path, tier_name, img, tubes, roi_mask=pr["roi_mask"],
+                            a_val=a_val, outdir=outdir)
 
     # per-image background illuminant (tube-free patch), same logic as run_sam_analysis.py
     H, W = img.shape[:2]
@@ -102,7 +153,8 @@ def process_one(path, tier_name, mask_gen, csv_rows):
         "bg_R": round(bg_R, 3), "bg_G": round(bg_G, 3), "bg_B": round(bg_B, 3),
         "_tier": tier_name,
     })
-    print(f"  {fname:20} tier={tier_name:9} a*={lab.get('a',0):+.2f}")
+    print(f"  [OK]   {fname:25} tier={tier_name:9} a*={lab.get('a',0):+.2f}  "
+         f"roi_px={pr['pixel_count']}  reliable={pr['reliable']}  -> {dpath}")
 
 
 def main(root, outdir):
@@ -125,7 +177,7 @@ def main(root, outdir):
                        if f.lower().endswith(IMG_EXTS + (".heic", ".heif")))
         print(f"\n=== {sub}/  ({len(files)} image(s), tier={tier_name}) ===")
         for f in files:
-            process_one(os.path.join(subpath, f), tier_name, mask_gen, csv_rows)
+            process_one(os.path.join(subpath, f), tier_name, mask_gen, csv_rows, outdir=outdir)
 
     if not found_any_folder:
         print(f"No high/low/negative subfolders found under {root}. "
