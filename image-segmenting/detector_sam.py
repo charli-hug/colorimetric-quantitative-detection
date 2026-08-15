@@ -130,7 +130,7 @@ def _dedup_masks(candidates, overlap_thresh=0.5):
 def detect_tubes(img, mask_generator,
                  area_min=4000, aspect_ratio_min=1.6, aspect_ratio_max=4.5,
                  solidity_min=0.55, extent_min=0.30,
-                 max_area_fraction=0.6,
+                 max_area_fraction=0.85,
                  overlap_thresh=0.5,
                  single_tube=False,
                  seg_max_dim=1024,
